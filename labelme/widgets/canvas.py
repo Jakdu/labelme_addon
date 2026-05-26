@@ -150,10 +150,11 @@ class Canvas(QtWidgets.QWidget):
         ptr.setsize(h * w * 4)
         return np.frombuffer(ptr, dtype=np.uint8).reshape(h, w, 4).copy()
 
-    def maskToPolygonPoints(self, simplify_epsilon=2.0):
+    def maskToPolygonPoints(self, simplify_epsilon=0.5):
         """
         현재 마스크를 OpenCV contour로 변환하여
         가장 큰 윤곽선의 포인트 리스트를 반환.
+        simplify_epsilon: 작을수록 정밀 (0.5=거의 픽셀 단위, 5.0=많이 단순화)
         반환값: [(x, y), ...] 또는 None
         """
         if self.maskImage is None:
@@ -171,9 +172,13 @@ class Canvas(QtWidgets.QWidget):
         alpha = arr[:, :, 3]
         binary = (alpha > 0).astype(np.uint8) * 255
 
-        # 윤곽선 추출
+        # 브러시 경계를 부드럽게 (작은 노이즈 제거)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        # 윤곽선 추출 — CHAIN_APPROX_NONE: 모든 외곽 픽셀 유지
         contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
             return None
 
@@ -182,7 +187,7 @@ class Canvas(QtWidgets.QWidget):
         if cv2.contourArea(contour) < 10:
             return None
 
-        # 폴리곤 단순화 (점 수 줄이기)
+        # 폴리곤 단순화: epsilon이 작을수록 원본에 가깝게
         approx = cv2.approxPolyDP(contour, simplify_epsilon, True)
         points = [(int(p[0][0]), int(p[0][1])) for p in approx]
         return points if len(points) >= 3 else None
@@ -820,37 +825,15 @@ class Canvas(QtWidgets.QWidget):
         key = ev.key()
         mods = int(ev.modifiers())
 
-        # ── 공통 단축키 ────────────────────────────────────────────────
         if key == QtCore.Qt.Key_Escape and self.current:
             self.current = None
             self.drawingPolygon.emit(False)
             self.update()
         elif key == QtCore.Qt.Key_Return and self.canCloseShape():
             self.finalise()
-
-        # ── 브러시 모드 전환 (이미지가 로드된 경우에만) ────────────────
-        elif key == QtCore.Qt.Key_B and not mods and self.pixmap and not self.pixmap.isNull():
-            self.brushModeChangeRequest.emit('draw')
-        elif key == QtCore.Qt.Key_E and not mods and self.pixmap and not self.pixmap.isNull():
-            self.brushModeChangeRequest.emit('erase')
-
-        # ── Ctrl+M: 마스크 → 폴리곤 ────────────────────────────────────
-        elif key == QtCore.Qt.Key_M and mods == QtCore.Qt.ControlModifier:
-            self.maskConvertRequest.emit()
-
-        # ── 브러시 크기 단축키 ( [ / ] ) ───────────────────────────────
-        elif key == QtCore.Qt.Key_BracketLeft:
-            step = 20 if (mods & QtCore.Qt.ShiftModifier) else 5
-            self.brushSize = max(1, self._brushSize - step)
-            self.brushSizeChanged.emit(self._brushSize)
-            self.update()
-        elif key == QtCore.Qt.Key_BracketRight:
-            step = 20 if (mods & QtCore.Qt.ShiftModifier) else 5
-            self.brushSize = min(500, self._brushSize + step)
-            self.brushSizeChanged.emit(self._brushSize)
-            self.update()
         else:
-            ev.ignore()  # 미처리 키는 부모(window)로 전달
+            # 처리 안 된 키는 부모(MainWindow.keyPressEvent)로 전달
+            ev.ignore()
 
     def setLastLabel(self, text):
         assert text

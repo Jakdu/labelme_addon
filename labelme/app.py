@@ -323,7 +323,7 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
         createBrushMode = action(
             'Brush Draw',
             lambda: self.setBrushMode('draw'),
-            'B',
+            None,           # 단축키는 keyPressEvent에서 직접 처리
             'objects',
             'Paint mask with brush (B)',
             enabled=False,
@@ -331,7 +331,7 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
         createEraserMode = action(
             'Brush Erase',
             lambda: self.setBrushMode('erase'),
-            'E',
+            None,
             'cancel',
             'Erase mask with eraser (E)',
             enabled=False,
@@ -339,7 +339,7 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
         convertMaskToPolygon = action(
             'Mask→Polygon',
             self.convertMaskToPolygon,
-            'Ctrl+M',
+            None,
             'objects',
             'Convert brush mask to polygon (Ctrl+M)',
             enabled=False,
@@ -1621,8 +1621,10 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
     # ------------------------------------------------------------------ #
 
     def _buildBrushSizeWidget(self):
-        """툴바 아래에 브러시 크기 슬라이더 도킹 위젯 추가."""
-        dock = QtWidgets.QDockWidget('Brush Size', self)
+        """툴바 아래에 브러시 크기 + 단순화 슬라이더 도킹 위젯 추가."""
+        self._brushSimplifyEpsilon = 0.5   # 기본값: 정밀
+
+        dock = QtWidgets.QDockWidget('Brush', self)
         dock.setObjectName('BrushSize')
         dock.setAllowedAreas(
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea |
@@ -1630,68 +1632,126 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
 
         container = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(container)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(8)
 
-        label = QtWidgets.QLabel('Size:')
-        slider = QtWidgets.QSlider(Qt.Horizontal)
-        slider.setMinimum(1)
-        slider.setMaximum(500)
-        slider.setValue(20)
-        slider.setFixedWidth(140)
+        # ── 브러시 크기 ──────────────────────────────────────────────────
+        layout.addWidget(QtWidgets.QLabel('Size:'))
 
-        spinbox = QtWidgets.QSpinBox()
-        spinbox.setMinimum(1)
-        spinbox.setMaximum(500)
-        spinbox.setValue(20)
-        spinbox.setFixedWidth(50)
+        sizeSlider = QtWidgets.QSlider(Qt.Horizontal)
+        sizeSlider.setMinimum(1)
+        sizeSlider.setMaximum(500)
+        sizeSlider.setValue(20)
+        sizeSlider.setFixedWidth(130)
+        layout.addWidget(sizeSlider)
 
-        def onSliderChanged(val):
-            spinbox.blockSignals(True)
-            spinbox.setValue(val)
-            spinbox.blockSignals(False)
+        sizeSpin = QtWidgets.QSpinBox()
+        sizeSpin.setMinimum(1)
+        sizeSpin.setMaximum(500)
+        sizeSpin.setValue(20)
+        sizeSpin.setFixedWidth(52)
+        layout.addWidget(sizeSpin)
+
+        def onSizeSlider(val):
+            sizeSpin.blockSignals(True)
+            sizeSpin.setValue(val)
+            sizeSpin.blockSignals(False)
             self.canvas.brushSize = val
 
-        def onSpinChanged(val):
-            slider.blockSignals(True)
-            slider.setValue(val)
-            slider.blockSignals(False)
+        def onSizeSpin(val):
+            sizeSlider.blockSignals(True)
+            sizeSlider.setValue(min(val, sizeSlider.maximum()))
+            sizeSlider.blockSignals(False)
             self.canvas.brushSize = val
 
-        slider.valueChanged.connect(onSliderChanged)
-        spinbox.valueChanged.connect(onSpinChanged)
-
-        # 캔버스에서 [ ] 단축키로 크기 변경 시 슬라이더/스핀박스 동기화
         def onCanvasBrushSizeChanged(val):
-            slider.blockSignals(True)
-            spinbox.blockSignals(True)
-            slider.setValue(min(val, slider.maximum()))
-            spinbox.setValue(val)
-            slider.blockSignals(False)
-            spinbox.blockSignals(False)
+            sizeSlider.blockSignals(True)
+            sizeSpin.blockSignals(True)
+            sizeSlider.setValue(min(val, sizeSlider.maximum()))
+            sizeSpin.setValue(val)
+            sizeSlider.blockSignals(False)
+            sizeSpin.blockSignals(False)
 
+        sizeSlider.valueChanged.connect(onSizeSlider)
+        sizeSpin.valueChanged.connect(onSizeSpin)
         self.canvas.brushSizeChanged.connect(onCanvasBrushSizeChanged)
 
-        layout.addWidget(label)
-        layout.addWidget(slider)
-        layout.addWidget(spinbox)
+        # ── 구분선 ──────────────────────────────────────────────────────
+        sep = QtWidgets.QFrame()
+        sep.setFrameShape(QtWidgets.QFrame.VLine)
+        sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        layout.addWidget(sep)
+
+        # ── 단순화 (Simplify) ────────────────────────────────────────────
+        layout.addWidget(QtWidgets.QLabel('Simplify:'))
+
+        # 슬라이더: 1~100 (내부적으로 0.1~10.0으로 변환)
+        simpSlider = QtWidgets.QSlider(Qt.Horizontal)
+        simpSlider.setMinimum(1)    # → epsilon 0.1 (최대 정밀)
+        simpSlider.setMaximum(100)  # → epsilon 10.0 (최대 단순화)
+        simpSlider.setValue(5)      # → epsilon 0.5 (기본: 정밀)
+        simpSlider.setFixedWidth(110)
+        simpSlider.setToolTip(
+            '낮을수록 정밀 (점 많음) / 높을수록 단순화 (점 적음)\n'
+            'Ctrl+M 으로 폴리곤 변환 시 적용됩니다.')
+        layout.addWidget(simpSlider)
+
+        simpLabel = QtWidgets.QLabel('0.5')
+        simpLabel.setFixedWidth(32)
+        simpLabel.setToolTip('현재 epsilon 값')
+        layout.addWidget(simpLabel)
+
+        def onSimpSlider(val):
+            eps = round(val * 0.1, 1)
+            self._brushSimplifyEpsilon = eps
+            simpLabel.setText(str(eps))
+
+        simpSlider.valueChanged.connect(onSimpSlider)
+
         container.setLayout(layout)
         dock.setWidget(container)
 
         self.addDockWidget(Qt.BottomDockWidgetArea, dock)
         self.brushSizeDock = dock
 
+    def keyPressEvent(self, ev):
+        """앱 레벨 키 이벤트 — 어느 위젯에 포커스가 있어도 브러시 단축키 작동."""
+        key = ev.key()
+        mods = int(ev.modifiers())
+        loaded = (self.canvas.pixmap is not None and
+                  not self.canvas.pixmap.isNull())
+
+        if key == QtCore.Qt.Key_B and not mods and loaded:
+            self.setBrushMode('draw')
+        elif key == QtCore.Qt.Key_E and not mods and loaded:
+            self.setBrushMode('erase')
+        elif key == QtCore.Qt.Key_M and mods == int(Qt.ControlModifier) and loaded:
+            self.convertMaskToPolygon()
+        elif key == QtCore.Qt.Key_BracketLeft:
+            step = 20 if (mods & int(Qt.ShiftModifier)) else 5
+            self.canvas.brushSize = max(1, self.canvas.brushSize - step)
+            self.canvas.brushSizeChanged.emit(self.canvas.brushSize)
+            self.canvas.update()
+        elif key == QtCore.Qt.Key_BracketRight:
+            step = 20 if (mods & int(Qt.ShiftModifier)) else 5
+            self.canvas.brushSize = min(500, self.canvas.brushSize + step)
+            self.canvas.brushSizeChanged.emit(self.canvas.brushSize)
+            self.canvas.update()
+        else:
+            super(MainWindow, self).keyPressEvent(ev)
+
     def setBrushMode(self, brushType='draw'):
         """브러시 or 지우개 모드로 전환."""
         if self.canvas.pixmap is None or self.canvas.pixmap.isNull():
             return
         self.canvas.setBrushMode(brushType)
+        self.canvas.setFocus()   # 포커스를 canvas로 강제 이동
         if brushType == 'draw':
             self.statusBar().showMessage(
-                'Brush mode — drag to paint mask  |  '
-                'Ctrl+M: convert to polygon  |  E: switch to eraser')
+                'Brush  B=붓  E=지우개  [ ]=크기  Ctrl+M=폴리곤변환')
         else:
             self.statusBar().showMessage(
-                'Eraser mode — drag to erase mask  |  B: switch to brush')
+                'Eraser  B=붓  E=지우개  [ ]=크기  Ctrl+M=폴리곤변환')
         self.setDirty()
 
     def clearBrushMask(self):
@@ -1707,9 +1767,8 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
                 '먼저 브러시로 영역을 칠해주세요.')
             return
 
-        # 단순화 epsilon: 브러시 크기에 비례
-        eps = max(1.0, self.canvas.brushSize * 0.3)
-        points = self.canvas.maskToPolygonPoints(simplify_epsilon=eps)
+        points = self.canvas.maskToPolygonPoints(
+            simplify_epsilon=self._brushSimplifyEpsilon)
         if points is None:
             QtWidgets.QMessageBox.warning(
                 self, 'Convert Failed',
