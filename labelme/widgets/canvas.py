@@ -31,7 +31,9 @@ class Canvas(QtWidgets.QWidget):
     drawingPolygon = QtCore.Signal(bool)
     edgeSelected = QtCore.Signal(bool)
     maskToPolygonRequest = QtCore.Signal()
-    brushSizeChanged = QtCore.Signal(int)   # 브러시 크기 변경 시 슬라이더 동기화용
+    brushSizeChanged = QtCore.Signal(int)       # [ ] 단축키로 크기 변경 시 슬라이더 동기화
+    brushModeChangeRequest = QtCore.Signal(str) # 'draw' or 'erase' — app.py로 위임
+    maskConvertRequest = QtCore.Signal()        # Ctrl+M — app.py로 위임
 
     CREATE, EDIT, BRUSH = 0, 1, 2
 
@@ -816,24 +818,39 @@ class Canvas(QtWidgets.QWidget):
 
     def keyPressEvent(self, ev):
         key = ev.key()
+        mods = int(ev.modifiers())
+
+        # ── 공통 단축키 ────────────────────────────────────────────────
         if key == QtCore.Qt.Key_Escape and self.current:
             self.current = None
             self.drawingPolygon.emit(False)
             self.update()
         elif key == QtCore.Qt.Key_Return and self.canCloseShape():
             self.finalise()
-        # ── 브러시 크기 단축키 ─────────────────────────────────────────
-        elif self.isBrushing():
-            if key == QtCore.Qt.Key_BracketLeft:    # [ → 작게
-                step = 5 if not (ev.modifiers() & QtCore.Qt.ShiftModifier) else 20
-                self.brushSize = max(1, self._brushSize - step)
-                self.brushSizeChanged.emit(self._brushSize)
-                self.update()
-            elif key == QtCore.Qt.Key_BracketRight:  # ] → 크게
-                step = 5 if not (ev.modifiers() & QtCore.Qt.ShiftModifier) else 20
-                self.brushSize = min(500, self._brushSize + step)
-                self.brushSizeChanged.emit(self._brushSize)
-                self.update()
+
+        # ── 브러시 모드 전환 (이미지가 로드된 경우에만) ────────────────
+        elif key == QtCore.Qt.Key_B and not mods and self.pixmap and not self.pixmap.isNull():
+            self.brushModeChangeRequest.emit('draw')
+        elif key == QtCore.Qt.Key_E and not mods and self.pixmap and not self.pixmap.isNull():
+            self.brushModeChangeRequest.emit('erase')
+
+        # ── Ctrl+M: 마스크 → 폴리곤 ────────────────────────────────────
+        elif key == QtCore.Qt.Key_M and mods == QtCore.Qt.ControlModifier:
+            self.maskConvertRequest.emit()
+
+        # ── 브러시 크기 단축키 ( [ / ] ) ───────────────────────────────
+        elif key == QtCore.Qt.Key_BracketLeft:
+            step = 20 if (mods & QtCore.Qt.ShiftModifier) else 5
+            self.brushSize = max(1, self._brushSize - step)
+            self.brushSizeChanged.emit(self._brushSize)
+            self.update()
+        elif key == QtCore.Qt.Key_BracketRight:
+            step = 20 if (mods & QtCore.Qt.ShiftModifier) else 5
+            self.brushSize = min(500, self._brushSize + step)
+            self.brushSizeChanged.emit(self._brushSize)
+            self.update()
+        else:
+            ev.ignore()  # 미처리 키는 부모(window)로 전달
 
     def setLastLabel(self, text):
         assert text

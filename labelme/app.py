@@ -514,6 +514,9 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
         )
 
         self.canvas.edgeSelected.connect(self.actions.addPoint.setEnabled)
+        # 캔버스 키보드 단축키 → 앱 메서드 연결
+        self.canvas.brushModeChangeRequest.connect(self.setBrushMode)
+        self.canvas.maskConvertRequest.connect(self.convertMaskToPolygon)
 
         self.menus = struct(
             file=self.menu('&File'),
@@ -611,6 +614,7 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
         self.otherData = None
         self.zoom_level = 100
         self.fit_window = False
+        self.lastLabel = ''
 
         if filename is not None and osp.isdir(filename):
             self.importDirImages(filename, load=False)
@@ -1713,8 +1717,7 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
             return
 
         # 라벨 다이얼로그 표시
-        text, flags, group_id = self.labelDialog.popUp(
-            text=self.lastLabel, flags={}, group_id=None)
+        text = self.labelDialog.popUp(text=self.lastLabel or None)
         if text is None:
             return
 
