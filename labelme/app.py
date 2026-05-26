@@ -319,6 +319,41 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
                           shortcuts['edit_polygon'], 'edit',
                           'Move and edit polygons', enabled=False)
 
+        # ── 브러시 도구 액션 ────────────────────────────────────────────
+        createBrushMode = action(
+            'Brush Draw',
+            lambda: self.setBrushMode('draw'),
+            'B',
+            'objects',
+            'Paint mask with brush (B)',
+            enabled=False,
+        )
+        createEraserMode = action(
+            'Brush Erase',
+            lambda: self.setBrushMode('erase'),
+            'E',
+            'cancel',
+            'Erase mask with eraser (E)',
+            enabled=False,
+        )
+        convertMaskToPolygon = action(
+            'Mask→Polygon',
+            self.convertMaskToPolygon,
+            'Ctrl+M',
+            'objects',
+            'Convert brush mask to polygon (Ctrl+M)',
+            enabled=False,
+        )
+        clearMask = action(
+            'Clear Mask',
+            self.clearBrushMask,
+            None,
+            'cancel',
+            'Clear current brush mask',
+            enabled=False,
+        )
+        # ────────────────────────────────────────────────────────────────
+
         delete = action('Delete Polygon', self.deleteSelectedShape,
                         shortcuts['delete_polygon'], 'cancel',
                         'Delete', enabled=False)
@@ -430,6 +465,10 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
             createLineMode=createLineMode,
             createPointMode=createPointMode,
             createLineStripMode=createLineStripMode,
+            createBrushMode=createBrushMode,
+            createEraserMode=createEraserMode,
+            convertMaskToPolygon=convertMaskToPolygon,
+            clearMask=clearMask,
             shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
             zoom=zoom, zoomIn=zoomIn, zoomOut=zoomOut, zoomOrg=zoomOrg,
             fitWindow=fitWindow, fitWidth=fitWidth,
@@ -466,6 +505,10 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
                 createPointMode,
                 createLineStripMode,
                 editMode,
+                createBrushMode,
+                createEraserMode,
+                convertMaskToPolygon,
+                clearMask,
             ),
             onShapesPresent=(saveAs, hideAll, showAll),
         )
@@ -531,12 +574,20 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
             delete,
             undo,
             None,
+            createBrushMode,
+            createEraserMode,
+            convertMaskToPolygon,
+            clearMask,
+            None,
             zoomIn,
             zoom,
             zoomOut,
             fitWindow,
             fitWidth,
         )
+
+        # 브러시 크기 슬라이더 (툴바 하단에 별도 위젯)
+        self._buildBrushSizeWidget()
 
         self.statusBar().showMessage('%s started.' % __appname__)
         self.statusBar().show()
@@ -1560,6 +1611,140 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
                     images.append(relativePath)
         images.sort(key=lambda x: x.lower())
         return images
+
+    # ------------------------------------------------------------------ #
+    #  브러시 도구 메서드
+    # ------------------------------------------------------------------ #
+
+    def _buildBrushSizeWidget(self):
+        """툴바 아래에 브러시 크기 슬라이더 도킹 위젯 추가."""
+        dock = QtWidgets.QDockWidget('Brush Size', self)
+        dock.setObjectName('BrushSize')
+        dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea |
+            Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(4, 2, 4, 2)
+
+        label = QtWidgets.QLabel('Size:')
+        slider = QtWidgets.QSlider(Qt.Horizontal)
+        slider.setMinimum(1)
+        slider.setMaximum(100)
+        slider.setValue(20)
+        slider.setFixedWidth(120)
+
+        spinbox = QtWidgets.QSpinBox()
+        spinbox.setMinimum(1)
+        spinbox.setMaximum(100)
+        spinbox.setValue(20)
+        spinbox.setFixedWidth(50)
+
+        def onSliderChanged(val):
+            spinbox.blockSignals(True)
+            spinbox.setValue(val)
+            spinbox.blockSignals(False)
+            self.canvas.brushSize = val
+
+        def onSpinChanged(val):
+            slider.blockSignals(True)
+            slider.setValue(val)
+            slider.blockSignals(False)
+            self.canvas.brushSize = val
+
+        slider.valueChanged.connect(onSliderChanged)
+        spinbox.valueChanged.connect(onSpinChanged)
+
+        layout.addWidget(label)
+        layout.addWidget(slider)
+        layout.addWidget(spinbox)
+        container.setLayout(layout)
+        dock.setWidget(container)
+
+        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.brushSizeDock = dock
+
+    def setBrushMode(self, brushType='draw'):
+        """브러시 or 지우개 모드로 전환."""
+        if self.canvas.pixmap is None or self.canvas.pixmap.isNull():
+            return
+        self.canvas.setBrushMode(brushType)
+        if brushType == 'draw':
+            self.statusBar().showMessage(
+                'Brush mode — drag to paint mask  |  '
+                'Ctrl+M: convert to polygon  |  E: switch to eraser')
+        else:
+            self.statusBar().showMessage(
+                'Eraser mode — drag to erase mask  |  B: switch to brush')
+        self.setDirty()
+
+    def clearBrushMask(self):
+        """마스크 전체 지우기."""
+        self.canvas.clearMask()
+        self.statusBar().showMessage('Mask cleared.')
+
+    def convertMaskToPolygon(self):
+        """마스크 → 폴리곤 변환 후 라벨 다이얼로그 표시."""
+        if not self.canvas.hasMask():
+            QtWidgets.QMessageBox.information(
+                self, 'No Mask',
+                '먼저 브러시로 영역을 칠해주세요.')
+            return
+
+        # 단순화 epsilon: 브러시 크기에 비례
+        eps = max(1.0, self.canvas.brushSize * 0.3)
+        points = self.canvas.maskToPolygonPoints(simplify_epsilon=eps)
+        if points is None:
+            QtWidgets.QMessageBox.warning(
+                self, 'Convert Failed',
+                '윤곽선을 찾을 수 없습니다. 더 넓은 영역을 칠해주세요.')
+            return
+
+        # 라벨 다이얼로그 표시
+        text, flags, group_id = self.labelDialog.popUp(
+            text=self.lastLabel, flags={}, group_id=None)
+        if text is None:
+            return
+
+        self.lastLabel = text
+
+        # Shape 생성
+        from labelme.shape import Shape as LabelShape
+        from qtpy.QtCore import QPointF
+        shape = LabelShape(label=text, shape_type='polygon')
+        for x, y in points:
+            shape.addPoint(QPointF(x, y))
+        shape.close()
+
+        # 캔버스에 추가
+        self.canvas.shapes.append(shape)
+        self.canvas.storeShapes()
+
+        # 마스크 초기화 후 편집 모드로 복귀
+        self.canvas.clearMask()
+        self.canvas.setEditing(True)
+        self.canvas.update()
+
+        # UI 갱신
+        self._updateShape(shape)
+        self.setDirty()
+        self.statusBar().showMessage(
+            'Mask converted to polygon: "%s" (%d points)' %
+            (text, len(points)))
+
+    def _updateShape(self, shape):
+        """새 shape을 레이블 리스트 위젯에 반영."""
+        r, g, b, a = shape.line_color.getRgb()
+        item = QtWidgets.QListWidgetItem(shape.label)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)
+        self.labelList.addItem(item)
+        if shape.label not in [
+                self.uniqLabelList.item(i).text()
+                for i in range(self.uniqLabelList.count())]:
+            self.uniqLabelList.addItem(shape.label)
+            self.uniqLabelList.sortItems()
 
 
 def apply_exif_orientation(image):

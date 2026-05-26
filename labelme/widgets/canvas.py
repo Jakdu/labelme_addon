@@ -1,3 +1,5 @@
+import numpy as np
+
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
@@ -16,6 +18,7 @@ CURSOR_POINT = QtCore.Qt.PointingHandCursor
 CURSOR_DRAW = QtCore.Qt.CrossCursor
 CURSOR_MOVE = QtCore.Qt.ClosedHandCursor
 CURSOR_GRAB = QtCore.Qt.OpenHandCursor
+CURSOR_BRUSH = QtCore.Qt.CrossCursor
 
 
 class Canvas(QtWidgets.QWidget):
@@ -27,13 +30,19 @@ class Canvas(QtWidgets.QWidget):
     shapeMoved = QtCore.Signal()
     drawingPolygon = QtCore.Signal(bool)
     edgeSelected = QtCore.Signal(bool)
+    # 브러시 마스크 → 폴리곤 변환 요청 시그널
+    maskToPolygonRequest = QtCore.Signal()
 
-    CREATE, EDIT = 0, 1
+    CREATE, EDIT, BRUSH = 0, 1, 2
 
     # polygon, rectangle, line, or point
     _createMode = 'polygon'
 
     _fill_drawing = False
+
+    # 브러시 모드: 'draw' or 'erase'
+    _brushMode = 'draw'
+    _brushSize = 20
 
     def __init__(self, *args, **kwargs):
         self.epsilon = kwargs.pop('epsilon', 11.0)
@@ -46,11 +55,6 @@ class Canvas(QtWidgets.QWidget):
         self.selectedShape = None  # save the selected shape here
         self.selectedShapeCopy = None
         self.lineColor = QtGui.QColor(0, 0, 255)
-        # self.line represents:
-        #   - createMode == 'polygon': edge from last point to current
-        #   - createMode == 'rectangle': diagonal line of the rectangle
-        #   - createMode == 'line': the line
-        #   - createMode == 'point': the point
         self.line = Shape(line_color=self.lineColor)
         self.prevPoint = QtCore.QPoint()
         self.prevMovePoint = QtCore.QPoint()
@@ -66,11 +70,120 @@ class Canvas(QtWidgets.QWidget):
         self.movingShape = False
         self._painter = QtGui.QPainter()
         self._cursor = CURSOR_DEFAULT
+
+        # 브러시 마스크 레이어
+        self.maskImage = None          # QImage (ARGB32)
+        self.maskColor = QtGui.QColor(255, 0, 0, 120)  # 반투명 빨강
+        self._brushPainting = False    # 마우스 드래그 중 여부
+
         # Menus:
         self.menus = (QtWidgets.QMenu(), QtWidgets.QMenu())
         # Set widget options.
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.WheelFocus)
+
+    # ------------------------------------------------------------------ #
+    #  브러시 관련 프로퍼티
+    # ------------------------------------------------------------------ #
+
+    @property
+    def brushMode(self):
+        return self._brushMode
+
+    @brushMode.setter
+    def brushMode(self, value):
+        assert value in ('draw', 'erase')
+        self._brushMode = value
+
+    @property
+    def brushSize(self):
+        return self._brushSize
+
+    @brushSize.setter
+    def brushSize(self, value):
+        self._brushSize = max(1, int(value))
+
+    def isBrushing(self):
+        return self.mode == self.BRUSH
+
+    def setBrushMode(self, brushType='draw'):
+        """BRUSH 모드로 전환 + draw/erase 설정."""
+        self.mode = self.BRUSH
+        self._brushMode = brushType
+        self.unHighlight()
+        self.deSelectShape()
+        self._ensureMask()
+
+    def _ensureMask(self):
+        """pixmap 크기에 맞는 마스크 이미지가 없으면 생성."""
+        if self.pixmap and not self.pixmap.isNull():
+            size = self.pixmap.size()
+            if (self.maskImage is None or
+                    self.maskImage.size() != size):
+                self.maskImage = QtGui.QImage(
+                    size, QtGui.QImage.Format_ARGB32)
+                self.maskImage.fill(QtCore.Qt.transparent)
+
+    def clearMask(self):
+        """마스크 전체 초기화."""
+        if self.maskImage is not None:
+            self.maskImage.fill(QtCore.Qt.transparent)
+            self.update()
+
+    def hasMask(self):
+        """마스크에 칠해진 픽셀이 있는지 여부."""
+        if self.maskImage is None:
+            return False
+        # numpy로 빠르게 확인
+        ptr = self.maskImage.bits()
+        ptr.setsize(self.maskImage.byteCount())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape(
+            self.maskImage.height(), self.maskImage.width(), 4)
+        return bool(arr[:, :, 3].any())
+
+    def maskToPolygonPoints(self, simplify_epsilon=2.0):
+        """
+        현재 마스크를 OpenCV contour로 변환하여
+        가장 큰 윤곽선의 포인트 리스트를 반환.
+        반환값: [(x, y), ...] 또는 None
+        """
+        if self.maskImage is None:
+            return None
+        try:
+            import cv2
+        except ImportError:
+            QtWidgets.QMessageBox.critical(
+                self, 'Error', 'opencv-python 패키지가 필요합니다.\n'
+                               'pip install opencv-python')
+            return None
+
+        # QImage → numpy (알파 채널 기준 마스크)
+        ptr = self.maskImage.bits()
+        ptr.setsize(self.maskImage.byteCount())
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape(
+            self.maskImage.height(), self.maskImage.width(), 4).copy()
+        alpha = arr[:, :, 3]
+        binary = (alpha > 0).astype(np.uint8) * 255
+
+        # 윤곽선 추출
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        # 가장 큰 윤곽선 선택
+        contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(contour) < 10:
+            return None
+
+        # 폴리곤 단순화 (점 수 줄이기)
+        approx = cv2.approxPolyDP(contour, simplify_epsilon, True)
+        points = [(int(p[0][0]), int(p[0][1])) for p in approx]
+        return points if len(points) >= 3 else None
+
+    # ------------------------------------------------------------------ #
+    #  기존 메서드
+    # ------------------------------------------------------------------ #
 
     def fillDrawing(self):
         return self._fill_drawing
@@ -144,6 +257,53 @@ class Canvas(QtWidgets.QWidget):
     def selectedVertex(self):
         return self.hVertex is not None
 
+    # ------------------------------------------------------------------ #
+    #  브러시 페인팅 내부 메서드
+    # ------------------------------------------------------------------ #
+
+    def _paintBrushAt(self, pos):
+        """마스크 이미지의 pos 위치에 브러시 or 지우개로 그림."""
+        self._ensureMask()
+        if self.maskImage is None:
+            return
+
+        p = QtGui.QPainter(self.maskImage)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        r = self._brushSize // 2
+        if self._brushMode == 'draw':
+            p.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(self.maskColor)
+            p.drawEllipse(
+                QtCore.QPoint(int(pos.x()), int(pos.y())), r, r)
+        else:  # erase
+            p.setCompositionMode(
+                QtGui.QPainter.CompositionMode_Clear)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtCore.Qt.transparent)
+            p.drawEllipse(
+                QtCore.QPoint(int(pos.x()), int(pos.y())), r, r)
+        p.end()
+        self.update()
+
+    def _paintBrushLine(self, p1, p2):
+        """두 점 사이를 보간하여 부드럽게 칠함."""
+        import math
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        dist = math.sqrt(dx * dx + dy * dy)
+        steps = max(1, int(dist / max(1, self._brushSize // 4)))
+        for i in range(steps + 1):
+            t = i / steps
+            x = p1.x() + dx * t
+            y = p1.y() + dy * t
+            self._paintBrushAt(QtCore.QPointF(x, y))
+
+    # ------------------------------------------------------------------ #
+    #  마우스 이벤트
+    # ------------------------------------------------------------------ #
+
     def mouseMoveEvent(self, ev):
         """Update line with last point and current coordinates."""
         if QT5:
@@ -153,6 +313,16 @@ class Canvas(QtWidgets.QWidget):
 
         self.prevMovePoint = pos
         self.restoreCursor()
+
+        # ── 브러시 모드 ──────────────────────────────────────────────────
+        if self.isBrushing():
+            self.overrideCursor(CURSOR_BRUSH)
+            if self._brushPainting and (
+                    QtCore.Qt.LeftButton & ev.buttons()):
+                if not self.outOfPixmap(pos):
+                    self._paintBrushLine(self.prevPoint, pos)
+                    self.prevPoint = pos
+            return
 
         # Polygon drawing.
         if self.drawing():
@@ -169,8 +339,6 @@ class Canvas(QtWidgets.QWidget):
                 pos = self.intersectionPoint(self.current[-1], pos)
             elif len(self.current) > 1 and self.createMode == 'polygon' and\
                     self.closeEnough(pos, self.current[0]):
-                # Attract line to starting point and
-                # colorise to alert the user.
                 pos = self.current[0]
                 color = self.current.line_color
                 self.overrideCursor(CURSOR_POINT)
@@ -220,14 +388,8 @@ class Canvas(QtWidgets.QWidget):
                 self.movingShape = True
             return
 
-        # Just hovering over the canvas, 2 posibilities:
-        # - Highlight shapes
-        # - Highlight vertex
-        # Update shape/vertex fill and tooltip value accordingly.
         self.setToolTip("Image")
         for shape in reversed([s for s in self.shapes if self.isVisible(s)]):
-            # Look for a nearby vertex to highlight. If that fails,
-            # check if we happen to be inside a shape.
             index = shape.nearestVertex(pos, self.epsilon)
             index_edge = shape.nearestEdge(pos, self.epsilon)
             if index is not None:
@@ -254,7 +416,7 @@ class Canvas(QtWidgets.QWidget):
                 self.overrideCursor(CURSOR_GRAB)
                 self.update()
                 break
-        else:  # Nothing found, clear highlights, reset state.
+        else:
             if self.hShape:
                 self.hShape.highlightClear()
                 self.update()
@@ -280,10 +442,19 @@ class Canvas(QtWidgets.QWidget):
             pos = self.transformPos(ev.pos())
         else:
             pos = self.transformPos(ev.posF())
+
+        # ── 브러시 모드 ──────────────────────────────────────────────────
+        if self.isBrushing():
+            if ev.button() == QtCore.Qt.LeftButton:
+                if not self.outOfPixmap(pos):
+                    self._brushPainting = True
+                    self.prevPoint = pos
+                    self._paintBrushAt(pos)
+            return
+
         if ev.button() == QtCore.Qt.LeftButton:
             if self.drawing():
                 if self.current:
-                    # Add point to existing shape.
                     if self.createMode == 'polygon':
                         self.current.addPoint(self.line[1])
                         self.line[0] = self.current[-1]
@@ -299,7 +470,6 @@ class Canvas(QtWidgets.QWidget):
                         if int(ev.modifiers()) == QtCore.Qt.ControlModifier:
                             self.finalise()
                 elif not self.outOfPixmap(pos):
-                    # Create new shape.
                     self.current = Shape(shape_type=self.createMode)
                     self.current.addPoint(pos)
                     if self.createMode == 'point':
@@ -321,12 +491,17 @@ class Canvas(QtWidgets.QWidget):
             self.repaint()
 
     def mouseReleaseEvent(self, ev):
+        # ── 브러시 모드 ──────────────────────────────────────────────────
+        if self.isBrushing():
+            if ev.button() == QtCore.Qt.LeftButton:
+                self._brushPainting = False
+            return
+
         if ev.button() == QtCore.Qt.RightButton:
             menu = self.menus[bool(self.selectedShapeCopy)]
             self.restoreCursor()
             if not menu.exec_(self.mapToGlobal(ev.pos()))\
                and self.selectedShapeCopy:
-                # Cancel the move by deleting the shadow copy.
                 self.selectedShapeCopy = None
                 self.repaint()
         elif ev.button() == QtCore.Qt.LeftButton and self.selectedShape:
@@ -338,8 +513,6 @@ class Canvas(QtWidgets.QWidget):
     def endMove(self, copy=False):
         assert self.selectedShape and self.selectedShapeCopy
         shape = self.selectedShapeCopy
-        # del shape.fill_color
-        # del shape.line_color
         if copy:
             self.shapes.append(shape)
             self.selectedShape.selected = False
@@ -355,8 +528,6 @@ class Canvas(QtWidgets.QWidget):
     def hideBackroundShapes(self, value):
         self.hideBackround = value
         if self.selectedShape:
-            # Only hide other shapes if there is a current selection.
-            # Otherwise the user will not be able to select a shape.
             self.setHiding(True)
             self.repaint()
 
@@ -367,8 +538,6 @@ class Canvas(QtWidgets.QWidget):
         return self.drawing() and self.current and len(self.current) > 2
 
     def mouseDoubleClickEvent(self, ev):
-        # We need at least 4 points here, since the mousePress handler
-        # adds an extra one before this handler is called.
         if self.canCloseShape() and len(self.current) > 3:
             self.current.popPoint()
             self.finalise()
@@ -384,7 +553,7 @@ class Canvas(QtWidgets.QWidget):
     def selectShapePoint(self, point):
         """Select the first shape created which contains this point."""
         self.deSelectShape()
-        if self.selectedVertex():  # A vertex is marked for selection.
+        if self.selectedVertex():
             index, shape = self.hVertex, self.hShape
             shape.highlightVertex(index, shape.MOVE_VERTEX)
             return
@@ -414,7 +583,7 @@ class Canvas(QtWidgets.QWidget):
 
     def boundedMoveShape(self, shape, pos):
         if self.outOfPixmap(pos):
-            return False  # No need to move
+            return False
         o1 = pos + self.offsets[0]
         if self.outOfPixmap(o1):
             pos -= QtCore.QPoint(min(0, o1.x()), min(0, o1.y()))
@@ -422,11 +591,6 @@ class Canvas(QtWidgets.QWidget):
         if self.outOfPixmap(o2):
             pos += QtCore.QPoint(min(0, self.pixmap.width() - o2.x()),
                                  min(0, self.pixmap.height() - o2.y()))
-        # XXX: The next line tracks the new position of the cursor
-        # relative to the shape, but also results in making it
-        # a bit "shaky" when nearing the border and allows it to
-        # go outside of the shape's area for some reason.
-        # self.calculateOffsets(self.selectedShape, pos)
         dp = pos - self.prevPoint
         if dp:
             shape.moveBy(dp)
@@ -463,14 +627,16 @@ class Canvas(QtWidgets.QWidget):
             return shape
 
     def boundedShiftShape(self, shape):
-        # Try to move in one direction, and if it fails in another.
-        # Give up if both fail.
         point = shape[0]
         offset = QtCore.QPoint(2.0, 2.0)
         self.calculateOffsets(shape, point)
         self.prevPoint = point
         if not self.boundedMoveShape(shape, point - offset):
             self.boundedMoveShape(shape, point + offset)
+
+    # ------------------------------------------------------------------ #
+    #  렌더링
+    # ------------------------------------------------------------------ #
 
     def paintEvent(self, event):
         if not self.pixmap:
@@ -486,6 +652,23 @@ class Canvas(QtWidgets.QWidget):
         p.translate(self.offsetToCenter())
 
         p.drawPixmap(0, 0, self.pixmap)
+
+        # 브러시 마스크 오버레이 렌더링
+        if self.maskImage is not None:
+            p.drawImage(0, 0, self.maskImage)
+
+        # 브러시 커서 미리보기 (붓 위치 원형 표시)
+        if self.isBrushing():
+            pos = self.prevMovePoint
+            r = self._brushSize // 2
+            if self._brushMode == 'draw':
+                p.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0, 200), 1))
+            else:
+                p.setPen(QtGui.QPen(QtGui.QColor(0, 120, 255, 200), 1))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawEllipse(
+                QtCore.QPoint(int(pos.x()), int(pos.y())), r, r)
+
         Shape.scale = self.scale
         for shape in self.shapes:
             if (shape.selected or not self._hideBackround) and \
@@ -519,7 +702,7 @@ class Canvas(QtWidgets.QWidget):
         aw, ah = area.width(), area.height()
         x = (aw - w) / (2 * s) if aw > w else 0
         y = (ah - h) / (2 * s) if ah > h else 0
-        return QtCore.QPoint(x, y)
+        return QtCore.QPoint(int(x), int(y))
 
     def outOfPixmap(self, p):
         w, h = self.pixmap.width(), self.pixmap.height()
@@ -536,15 +719,9 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def closeEnough(self, p1, p2):
-        # d = distance(p1 - p2)
-        # m = (p1-p2).manhattanLength()
-        # print "d %.2f, m %d, %.2f" % (d, m, d - m)
         return labelme.utils.distance(p1 - p2) < self.epsilon
 
     def intersectionPoint(self, p1, p2):
-        # Cycle through each image edge in clockwise fashion,
-        # and find the one intersecting the current line segment.
-        # http://paulbourke.net/geometry/lineline2d/
         size = self.pixmap.size()
         points = [(0, 0),
                   (size.width() - 1, 0),
@@ -556,21 +733,13 @@ class Canvas(QtWidgets.QWidget):
         x3, y3 = points[i]
         x4, y4 = points[(i + 1) % 4]
         if (x, y) == (x1, y1):
-            # Handle cases where previous point is on one of the edges.
             if x3 == x4:
                 return QtCore.QPoint(x3, min(max(0, y2), max(y3, y4)))
-            else:  # y3 == y4
+            else:
                 return QtCore.QPoint(min(max(0, x2), max(x3, x4)), y3)
         return QtCore.QPoint(x, y)
 
     def intersectingEdges(self, point1, point2, points):
-        """Find intersecting edges.
-
-        For each edge formed by `points', yield the intersection
-        with the line segment `(x1,y1) - (x2,y2)`, if it exists.
-        Also return the distance of `(x2,y2)' to the middle of the
-        edge along with its index, so that the one closest can be chosen.
-        """
         (x1, y1) = point1
         (x2, y2) = point2
         for i in range(4):
@@ -580,9 +749,6 @@ class Canvas(QtWidgets.QWidget):
             nua = (x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)
             nub = (x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)
             if denom == 0:
-                # This covers two cases:
-                #   nua == nub == 0: Coincident
-                #   otherwise: Parallel
                 continue
             ua, ub = nua / denom, nub / denom
             if 0 <= ua <= 1 and 0 <= ub <= 1:
@@ -592,8 +758,6 @@ class Canvas(QtWidgets.QWidget):
                 d = labelme.utils.distance(m - QtCore.QPoint(x2, y2))
                 yield d, i, (x, y)
 
-    # These two, along with a call to adjustSize are required for the
-    # scroll area.
     def sizeHint(self):
         return self.minimumSizeHint()
 
@@ -607,18 +771,14 @@ class Canvas(QtWidgets.QWidget):
             mods = ev.modifiers()
             delta = ev.angleDelta()
             if QtCore.Qt.ControlModifier == int(mods):
-                # with Ctrl/Command key
-                # zoom
                 self.zoomRequest.emit(delta.y(), ev.pos())
             else:
-                # scroll
                 self.scrollRequest.emit(delta.x(), QtCore.Qt.Horizontal)
                 self.scrollRequest.emit(delta.y(), QtCore.Qt.Vertical)
         else:
             if ev.orientation() == QtCore.Qt.Vertical:
                 mods = ev.modifiers()
                 if QtCore.Qt.ControlModifier == int(mods):
-                    # with Ctrl/Command key
                     self.zoomRequest.emit(ev.delta(), ev.pos())
                 else:
                     self.scrollRequest.emit(
@@ -672,6 +832,7 @@ class Canvas(QtWidgets.QWidget):
     def loadPixmap(self, pixmap):
         self.pixmap = pixmap
         self.shapes = []
+        self.maskImage = None   # 이미지 바뀌면 마스크 초기화
         self.repaint()
 
     def loadShapes(self, shapes):
@@ -695,5 +856,6 @@ class Canvas(QtWidgets.QWidget):
     def resetState(self):
         self.restoreCursor()
         self.pixmap = None
+        self.maskImage = None
         self.shapesBackups = []
         self.update()
