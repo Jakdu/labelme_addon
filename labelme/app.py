@@ -1631,13 +1631,13 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
         label = QtWidgets.QLabel('Size:')
         slider = QtWidgets.QSlider(Qt.Horizontal)
         slider.setMinimum(1)
-        slider.setMaximum(100)
+        slider.setMaximum(500)
         slider.setValue(20)
-        slider.setFixedWidth(120)
+        slider.setFixedWidth(140)
 
         spinbox = QtWidgets.QSpinBox()
         spinbox.setMinimum(1)
-        spinbox.setMaximum(100)
+        spinbox.setMaximum(500)
         spinbox.setValue(20)
         spinbox.setFixedWidth(50)
 
@@ -1655,6 +1655,17 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
 
         slider.valueChanged.connect(onSliderChanged)
         spinbox.valueChanged.connect(onSpinChanged)
+
+        # 캔버스에서 [ ] 단축키로 크기 변경 시 슬라이더/스핀박스 동기화
+        def onCanvasBrushSizeChanged(val):
+            slider.blockSignals(True)
+            spinbox.blockSignals(True)
+            slider.setValue(min(val, slider.maximum()))
+            spinbox.setValue(val)
+            slider.blockSignals(False)
+            spinbox.blockSignals(False)
+
+        self.canvas.brushSizeChanged.connect(onCanvasBrushSizeChanged)
 
         layout.addWidget(label)
         layout.addWidget(slider)

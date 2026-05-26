@@ -18,7 +18,7 @@ CURSOR_POINT = QtCore.Qt.PointingHandCursor
 CURSOR_DRAW = QtCore.Qt.CrossCursor
 CURSOR_MOVE = QtCore.Qt.ClosedHandCursor
 CURSOR_GRAB = QtCore.Qt.OpenHandCursor
-CURSOR_BRUSH = QtCore.Qt.CrossCursor
+CURSOR_BRUSH = QtCore.Qt.BlankCursor   # 브러시 모드: 시스템 커서 숨기고 직접 그림
 
 
 class Canvas(QtWidgets.QWidget):
@@ -30,8 +30,8 @@ class Canvas(QtWidgets.QWidget):
     shapeMoved = QtCore.Signal()
     drawingPolygon = QtCore.Signal(bool)
     edgeSelected = QtCore.Signal(bool)
-    # 브러시 마스크 → 폴리곤 변환 요청 시그널
     maskToPolygonRequest = QtCore.Signal()
+    brushSizeChanged = QtCore.Signal(int)   # 브러시 크기 변경 시 슬라이더 동기화용
 
     CREATE, EDIT, BRUSH = 0, 1, 2
 
@@ -324,6 +324,8 @@ class Canvas(QtWidgets.QWidget):
                 if not self.outOfPixmap(pos) and self.prevPoint is not None:
                     self._paintBrushLine(self.prevPoint, pos)
                 self.prevPoint = pos
+            else:
+                self.update()  # 커서 미리보기 갱신
             return
 
         # Polygon drawing.
@@ -659,17 +661,37 @@ class Canvas(QtWidgets.QWidget):
         if self.maskImage is not None:
             p.drawImage(0, 0, self.maskImage)
 
-        # 브러시 커서 미리보기 (붓 위치 원형 표시)
+        # 브러시 커서 미리보기
         if self.isBrushing():
             pos = self.prevMovePoint
-            r = self._brushSize // 2
+            r = max(1, self._brushSize // 2)
+            cx, cy = int(pos.x()), int(pos.y())
+
             if self._brushMode == 'draw':
-                p.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0, 200), 1))
+                outer_color = QtGui.QColor(255, 80, 80, 230)
+                inner_color = QtGui.QColor(255, 80, 80, 40)
             else:
-                p.setPen(QtGui.QPen(QtGui.QColor(0, 120, 255, 200), 1))
+                outer_color = QtGui.QColor(60, 140, 255, 230)
+                inner_color = QtGui.QColor(60, 140, 255, 30)
+
+            # 반투명 내부 채움
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(inner_color)
+            p.drawEllipse(QtCore.QPoint(cx, cy), r, r)
+
+            # 외곽선 (흰색 테두리 + 색상 테두리로 대비)
+            pen_w = max(1, int(1.5 / self.scale))
             p.setBrush(QtCore.Qt.NoBrush)
-            p.drawEllipse(
-                QtCore.QPoint(int(pos.x()), int(pos.y())), r, r)
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 180), pen_w + 1))
+            p.drawEllipse(QtCore.QPoint(cx, cy), r, r)
+            p.setPen(QtGui.QPen(outer_color, pen_w))
+            p.drawEllipse(QtCore.QPoint(cx, cy), r, r)
+
+            # 중심 십자 (작은 점)
+            cs = max(2, int(3 / self.scale))
+            p.setPen(QtGui.QPen(outer_color, pen_w))
+            p.drawLine(cx - cs, cy, cx + cs, cy)
+            p.drawLine(cx, cy - cs, cx, cy + cs)
 
         Shape.scale = self.scale
         for shape in self.shapes:
@@ -800,6 +822,18 @@ class Canvas(QtWidgets.QWidget):
             self.update()
         elif key == QtCore.Qt.Key_Return and self.canCloseShape():
             self.finalise()
+        # ── 브러시 크기 단축키 ─────────────────────────────────────────
+        elif self.isBrushing():
+            if key == QtCore.Qt.Key_BracketLeft:    # [ → 작게
+                step = 5 if not (ev.modifiers() & QtCore.Qt.ShiftModifier) else 20
+                self.brushSize = max(1, self._brushSize - step)
+                self.brushSizeChanged.emit(self._brushSize)
+                self.update()
+            elif key == QtCore.Qt.Key_BracketRight:  # ] → 크게
+                step = 5 if not (ev.modifiers() & QtCore.Qt.ShiftModifier) else 20
+                self.brushSize = min(500, self._brushSize + step)
+                self.brushSizeChanged.emit(self._brushSize)
+                self.update()
 
     def setLastLabel(self, text):
         assert text
