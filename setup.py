@@ -8,8 +8,6 @@ import shlex
 import subprocess
 import sys
 
-import github2pypi
-
 
 PY3 = sys.version_info[0] == 3
 PY2 = sys.version_info[0] == 2
@@ -76,7 +74,7 @@ if QT_BINDING is None:
 del QT_BINDING
 
 
-if sys.argv[1] == 'release':
+if len(sys.argv) > 1 and sys.argv[1] == 'release':
     if not distutils.spawn.find_executable('twine'):
         print(
             'Please install twine:\n\n\tpip install twine\n',
@@ -95,15 +93,8 @@ if sys.argv[1] == 'release':
     sys.exit(0)
 
 
-if not hasattr(github2pypi, '__file__'):
-    print('Please update submodule:\n\n\tgit submodule update --init')
-    sys.exit(1)
-
-
-with open('README.md') as f:
-    long_description = github2pypi.replace_url(
-        slug='wkentaro/labelme', content=f.read()
-    )
+with open('README.md', encoding='utf-8') as f:
+    long_description = f.read()
 
 
 setup(
