@@ -1071,7 +1071,7 @@ class MainWindow(QtWidgets.QMainWindow, WindowMixin):
     def scrollRequest(self, delta, orientation):
         units = - delta * 0.1  # natural scroll
         bar = self.scrollBars[orientation]
-        bar.setValue(bar.value() + bar.singleStep() * units)
+        bar.setValue(int(bar.value() + bar.singleStep() * units))
 
     def setZoom(self, value):
         self.actions.fitWidth.setChecked(False)

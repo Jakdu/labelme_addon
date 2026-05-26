@@ -134,12 +134,19 @@ class Canvas(QtWidgets.QWidget):
         """마스크에 칠해진 픽셀이 있는지 여부."""
         if self.maskImage is None:
             return False
-        # numpy로 빠르게 확인
-        ptr = self.maskImage.bits()
-        ptr.setsize(self.maskImage.byteCount())
-        arr = np.frombuffer(ptr, dtype=np.uint8).reshape(
-            self.maskImage.height(), self.maskImage.width(), 4)
-        return bool(arr[:, :, 3].any())
+        try:
+            arr = self._maskToNumpy()
+            return bool(arr[:, :, 3].any())
+        except Exception:
+            return False
+
+    def _maskToNumpy(self):
+        """QImage → numpy ARGB 배열로 변환."""
+        img = self.maskImage.convertToFormat(QtGui.QImage.Format_ARGB32)
+        w, h = img.width(), img.height()
+        ptr = img.bits()
+        ptr.setsize(h * w * 4)
+        return np.frombuffer(ptr, dtype=np.uint8).reshape(h, w, 4).copy()
 
     def maskToPolygonPoints(self, simplify_epsilon=2.0):
         """
@@ -158,10 +165,7 @@ class Canvas(QtWidgets.QWidget):
             return None
 
         # QImage → numpy (알파 채널 기준 마스크)
-        ptr = self.maskImage.bits()
-        ptr.setsize(self.maskImage.byteCount())
-        arr = np.frombuffer(ptr, dtype=np.uint8).reshape(
-            self.maskImage.height(), self.maskImage.width(), 4).copy()
+        arr = self._maskToNumpy()
         alpha = arr[:, :, 3]
         binary = (alpha > 0).astype(np.uint8) * 255
 
@@ -261,44 +265,42 @@ class Canvas(QtWidgets.QWidget):
     #  브러시 페인팅 내부 메서드
     # ------------------------------------------------------------------ #
 
-    def _paintBrushAt(self, pos):
-        """마스크 이미지의 pos 위치에 브러시 or 지우개로 그림."""
+    def _paintBrushLine(self, p1, p2):
+        """두 점 사이를 보간하여 부드럽게 칠함 (QPainter 1회만 생성)."""
+        import math
         self._ensureMask()
         if self.maskImage is None:
             return
 
-        p = QtGui.QPainter(self.maskImage)
-        p.setRenderHint(QtGui.QPainter.Antialiasing)
-
-        r = self._brushSize // 2
-        if self._brushMode == 'draw':
-            p.setCompositionMode(QtGui.QPainter.CompositionMode_Source)
-            p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(self.maskColor)
-            p.drawEllipse(
-                QtCore.QPoint(int(pos.x()), int(pos.y())), r, r)
-        else:  # erase
-            p.setCompositionMode(
-                QtGui.QPainter.CompositionMode_Clear)
-            p.setPen(QtCore.Qt.NoPen)
-            p.setBrush(QtCore.Qt.transparent)
-            p.drawEllipse(
-                QtCore.QPoint(int(pos.x()), int(pos.y())), r, r)
-        p.end()
-        self.update()
-
-    def _paintBrushLine(self, p1, p2):
-        """두 점 사이를 보간하여 부드럽게 칠함."""
-        import math
-        dx = p2.x() - p1.x()
-        dy = p2.y() - p1.y()
+        dx = float(p2.x()) - float(p1.x())
+        dy = float(p2.y()) - float(p1.y())
         dist = math.sqrt(dx * dx + dy * dy)
-        steps = max(1, int(dist / max(1, self._brushSize // 4)))
+        step_size = max(1, self._brushSize // 4)
+        steps = max(1, int(dist / step_size))
+
+        painter = QtGui.QPainter(self.maskImage)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        r = max(1, self._brushSize // 2)
+
+        if self._brushMode == 'draw':
+            painter.setCompositionMode(
+                QtGui.QPainter.CompositionMode_Source)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(self.maskColor)
+        else:
+            painter.setCompositionMode(
+                QtGui.QPainter.CompositionMode_Clear)
+            painter.setPen(QtCore.Qt.NoPen)
+            painter.setBrush(QtCore.Qt.transparent)
+
         for i in range(steps + 1):
             t = i / steps
-            x = p1.x() + dx * t
-            y = p1.y() + dy * t
-            self._paintBrushAt(QtCore.QPointF(x, y))
+            x = float(p1.x()) + dx * t
+            y = float(p1.y()) + dy * t
+            painter.drawEllipse(QtCore.QPointF(x, y), r, r)
+
+        painter.end()
+        self.update()
 
     # ------------------------------------------------------------------ #
     #  마우스 이벤트
@@ -319,9 +321,9 @@ class Canvas(QtWidgets.QWidget):
             self.overrideCursor(CURSOR_BRUSH)
             if self._brushPainting and (
                     QtCore.Qt.LeftButton & ev.buttons()):
-                if not self.outOfPixmap(pos):
+                if not self.outOfPixmap(pos) and self.prevPoint is not None:
                     self._paintBrushLine(self.prevPoint, pos)
-                    self.prevPoint = pos
+                self.prevPoint = pos
             return
 
         # Polygon drawing.
@@ -449,7 +451,7 @@ class Canvas(QtWidgets.QWidget):
                 if not self.outOfPixmap(pos):
                     self._brushPainting = True
                     self.prevPoint = pos
-                    self._paintBrushAt(pos)
+                    self._paintBrushLine(pos, pos)  # 첫 점 찍기
             return
 
         if ev.button() == QtCore.Qt.LeftButton:
